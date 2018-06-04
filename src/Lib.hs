@@ -86,7 +86,6 @@ instance Monad Term where
 
 instance Named Term where
   type Raw Term = RawTerm
-
   lam = TmLam
   app = TmApp
   embed = TmEmbed
@@ -152,6 +151,8 @@ instance Monad Type where
       TyApp t1 t2 -> TyApp (t1 >>= f) ((>>= f) <$> t2)
       TyLam s -> TyLam (s >>>= f)
 
--- instance Named Type where
---   lam = TyLam
---   app = TyApp
+instance Named Type where
+  type Raw Type = RawType
+  lam = TyLam
+  app = TyApp
+  embed = TyEmbed
