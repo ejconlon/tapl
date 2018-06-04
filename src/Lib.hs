@@ -11,6 +11,7 @@ module Lib where
 
 import Bound
 import Control.Monad (ap)
+-- import Coproduct
 import Data.Sequence (Seq)
 import Data.Sequence as Seq
 import Data.Functor.Classes
@@ -24,8 +25,21 @@ import Data.Deriving (deriveEq1, deriveOrd1, deriveRead1, deriveShow1)
 --   | TmIsZero !(f a)
 --   deriving (Functor, Foldable, Traversable, Generic)
 
+-- data RawTerm a =
+--     RTmTrue
+--   | RTmFalse
+--   | RTmZero
+--   | RTmIsZero !a
+--   deriving (Functor, Foldable, Traversable, Generic)
+
+-- data BTerm f a =
+--     BTmLift !(f a)
+--   | BTmVar !a
+--   | BTmApp !(Term a) !(Seq (Term a))
+--   | BTmLam !(Scope Int Term a)
+--   deriving (Functor, Foldable, Traversable, Generic)
+
 data Term a =
-    -- TmLift !(RawTerm Term a)
     TmTrue
   | TmFalse
   | TmVar !a
