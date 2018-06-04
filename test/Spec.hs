@@ -11,6 +11,6 @@ tests = testGroup "tests"
       let x = TmTrue :: Term String
       smallStep x @?= Nothing
   , testCase "lam" $ do
-      let x = TmApp (lam "z" (TmPure "z")) TmTrue
+      let x = TmApp (lam "z" (TmVar "z")) TmTrue
       smallStep x @?= Just TmTrue
   ]

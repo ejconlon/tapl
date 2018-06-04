@@ -19,16 +19,17 @@ import GHC.Generics (Generic)
 import Data.Deriving (deriveEq1, deriveOrd1, deriveShow1)
 
 -- data RawTerm f a =
---   TmTrue
--- | TmFalse
--- | TmZero
--- | TmIsZero !(f a)
--- deriving (Functor, Foldable, Traversable, Generic)
+--     TmTrue
+--   | TmFalse
+--   | TmZero
+--   | TmIsZero !(f a)
+--   deriving (Functor, Foldable, Traversable, Generic)
 
 data Term a =
+    -- TmLift !(RawTerm Term a)
     TmTrue
   | TmFalse
-  | TmPure !a
+  | TmVar !a
   | TmApp !(Term a) !(Term a)
   | TmLam !(Scope () Term a)
   deriving (Functor, Foldable, Traversable, Generic)
@@ -45,7 +46,7 @@ instance Ord a => Ord (Term a) where compare = compare1
 instance Show a => Show (Term a) where showsPrec = showsPrec1
 
 instance Applicative Term where
-  pure = TmPure
+  pure = TmVar
   (<*>) = ap
 
 instance Monad Term where
@@ -54,7 +55,7 @@ instance Monad Term where
     case t of
       TmTrue -> TmTrue
       TmFalse -> TmFalse
-      TmPure a -> f a
+      TmVar a -> f a
       TmApp t1 t2 -> TmApp (t1 >>= f) (t2 >>= f)
       TmLam s -> TmLam (s >>>= f)
 
@@ -108,23 +109,26 @@ instance Monad (Step s) where
   Done a >>= f = f a
   Running s n >>= f = Running s (\s' -> n s' >>= f)
 
-holes :: Term a -> Step (Term a) (Term a)
-holes t =
-  case t of
-    TmApp body arg -> idStep =<< TmApp <$> holes body <*> holes arg
-    _ -> pure t
+class Eval f where
+  holes :: f a -> Step (f a) (f a)
+  smallHoleStep :: f a -> Maybe (f a)
 
-smallHoleStep :: Term a -> Maybe (Term a)
-smallHoleStep t =
-  case t of
-    TmApp body arg ->
-      case body of
-        TmLam s -> Just (instantiate1 arg s)
-        _ -> Nothing
-    _ -> Nothing
-
-smallStep :: Term a -> Maybe (Term a)
+smallStep :: Eval f => f a -> Maybe (f a)
 smallStep t = smallStepMaybe (holes t) smallHoleStep
 
-starStep :: Term a -> Maybe (Term a)
+starStep :: Eval f => f a -> Maybe (f a)
 starStep t = starStepMaybe (holes t) smallHoleStep
+
+instance Eval Term where
+  holes t =
+    case t of
+      TmApp body arg -> idStep =<< TmApp <$> holes body <*> holes arg
+      _ -> pure t
+
+  smallHoleStep t =
+    case t of
+      TmApp body arg ->
+        case body of
+          TmLam s -> Just (instantiate1 arg s)
+          _ -> Nothing
+      _ -> Nothing
