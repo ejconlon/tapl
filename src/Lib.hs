@@ -11,12 +11,11 @@ module Lib where
 
 import Bound
 import Control.Monad (ap)
--- import Data.Sequence (Seq)
--- import Data.Text (Text)
--- import Data.Text as T
+import Data.Sequence (Seq)
+import Data.Sequence as Seq
 import Data.Functor.Classes
 import GHC.Generics (Generic)
-import Data.Deriving (deriveEq1, deriveOrd1, deriveShow1)
+import Data.Deriving (deriveEq1, deriveOrd1, deriveRead1, deriveShow1)
 
 -- data RawTerm f a =
 --     TmTrue
@@ -30,19 +29,27 @@ data Term a =
     TmTrue
   | TmFalse
   | TmVar !a
-  | TmApp !(Term a) !(Term a)
-  | TmLam !(Scope () Term a)
+  | TmApp !(Term a) !(Seq (Term a))
+  | TmLam !(Scope Int Term a)
   deriving (Functor, Foldable, Traversable, Generic)
 
-lam :: Eq a => a -> Term a -> Term a
-lam name body = TmLam (abstract1 name body)
+lam :: Eq a => Seq a -> Term a -> Term a
+lam names = TmLam . abstract (flip Seq.elemIndexL names)
+
+lam1 :: Eq a => a -> Term a -> Term a
+lam1 name = lam (Seq.singleton name)
+
+app1 :: Term a -> Term a -> Term a
+app1 left right = TmApp left (Seq.singleton right)
 
 deriveEq1 ''Term
 deriveOrd1 ''Term
+deriveRead1 ''Term
 deriveShow1 ''Term
 
 instance Eq a => Eq (Term a) where (==) = eq1
 instance Ord a => Ord (Term a) where compare = compare1
+instance Read a => Read (Term a) where readsPrec = readsPrec1
 instance Show a => Show (Term a) where showsPrec = showsPrec1
 
 instance Applicative Term where
@@ -56,7 +63,7 @@ instance Monad Term where
       TmTrue -> TmTrue
       TmFalse -> TmFalse
       TmVar a -> f a
-      TmApp t1 t2 -> TmApp (t1 >>= f) (t2 >>= f)
+      TmApp t1 t2 -> TmApp (t1 >>= f) ((>>= f) <$> t2)
       TmLam s -> TmLam (s >>>= f)
 
 data Step s a =
@@ -122,13 +129,13 @@ starStep t = starStepMaybe (holes t) smallHoleStep
 instance Eval Term where
   holes t =
     case t of
-      TmApp body arg -> idStep =<< TmApp <$> holes body <*> holes arg
+      TmApp body args -> idStep =<< TmApp <$> holes body <*> traverse holes args
       _ -> pure t
 
   smallHoleStep t =
     case t of
-      TmApp body arg ->
+      TmApp body args ->
         case body of
-          TmLam s -> Just (instantiate1 arg s)
+          TmLam s -> Just (instantiate (Seq.index args) s)
           _ -> Nothing
       _ -> Nothing

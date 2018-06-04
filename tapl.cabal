@@ -16,10 +16,10 @@ library
   exposed-modules:     Lib
   build-depends:       base >= 4.10 && < 5
                      , bound
+                     , containers
                      , data-fix
                      , deriving-compat
                      , mtl
-                     , text
                      , transformers
   default-language:    Haskell2010
 
