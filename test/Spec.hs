@@ -6,7 +6,7 @@ import Test.Tasty.HUnit
 main = defaultMain tests
 
 tmTrue :: Term String
-tmTrue = lifting RTmTrue
+tmTrue = embed RTmTrue
 
 tests = testGroup "tests"
   [ testCase "dummy" $

@@ -3,9 +3,8 @@
   DeriveGeneric,
   DeriveTraversable,
   FlexibleContexts,
-  FunctionalDependencies,
   TemplateHaskell,
-  ViewPatterns
+  TypeFamilies
 #-}
 
 module Lib where
@@ -20,30 +19,12 @@ import Data.Functor.Classes
 import Eval
 import GHC.Generics (Generic)
 
--- data RawTerm f a =
---     TmTrue
---   | TmFalse
---   | TmZero
---   | TmIsZero !(f a)
---   deriving (Functor, Foldable, Traversable, Generic)
-
--- data RawTerm a =
---     RTmTrue
---   | RTmFalse
---   | RTmZero
---   | RTmIsZero !a
---   deriving (Functor, Foldable, Traversable, Generic)
-
--- data BTerm f a =
---     BTmLift !(f a)
---   | BTmVar !a
---   | BTmApp !(Term a) !(Seq (Term a))
---   | BTmLam !(Scope Int Term a)
---   deriving (Functor, Foldable, Traversable, Generic)
-
 class Monad f => Named f where
+  type Raw f :: * -> *
+
   lam :: Scope Int f a -> f a
   app :: f a -> Seq (f a) -> f a
+  embed :: Raw f (f a) -> f a
 
   lamN :: Eq a => Seq a -> f a -> f a
   lamN names = lam . abstract (flip Seq.elemIndexL names)
@@ -53,9 +34,6 @@ class Monad f => Named f where
 
   app1 :: f a -> f a -> f a
   app1 left right = app left (Seq.singleton right)
-
-class Lifting f g | f -> g where
-  lifting :: g (f a) -> f a
 
 -- TERMS
 
@@ -71,8 +49,13 @@ deriveOrd1 ''RawTerm
 deriveRead1 ''RawTerm
 deriveShow1 ''RawTerm
 
+instance Eq a => Eq (RawTerm a) where (==) = eq1
+instance Ord a => Ord (RawTerm a) where compare = compare1
+instance Read a => Read (RawTerm a) where readsPrec = readsPrec1
+instance Show a => Show (RawTerm a) where showsPrec = showsPrec1
+
 data Term a =
-    TmLift !(RawTerm (Term a))
+    TmEmbed !(RawTerm (Term a))
   | TmVar !a
   | TmApp !(Term a) !(Seq (Term a))
   | TmLam !(Scope Int Term a)
@@ -96,14 +79,17 @@ instance Monad Term where
   return = pure
   t >>= f =
     case t of
-      TmLift r -> TmLift ((>>= f) <$> r)
+      TmEmbed r -> TmEmbed ((>>= f) <$> r)
       TmVar a -> f a
       TmApp t1 t2 -> TmApp (t1 >>= f) ((>>= f) <$> t2)
       TmLam s -> TmLam (s >>>= f)
 
 instance Named Term where
+  type Raw Term = RawTerm
+
   lam = TmLam
   app = TmApp
+  embed = TmEmbed
 
 instance Eval Term where
   holes t =
@@ -119,13 +105,25 @@ instance Eval Term where
           _ -> Nothing
       _ -> Nothing
 
-instance Lifting Term RawTerm where
-  lifting = TmLift
-
 -- TYPES
 
+data RawType a =
+    RTyBool
+  | RTyNat
+  deriving (Functor, Foldable, Traversable)
+
+deriveEq1 ''RawType
+deriveOrd1 ''RawType
+deriveRead1 ''RawType
+deriveShow1 ''RawType
+
+instance Eq a => Eq (RawType a) where (==) = eq1
+instance Ord a => Ord (RawType a) where compare = compare1
+instance Read a => Read (RawType a) where readsPrec = readsPrec1
+instance Show a => Show (RawType a) where showsPrec = showsPrec1
+
 data Type a =
-    TyBool
+    TyEmbed !(RawType (Type a))
   | TyVar !a
   | TyApp !(Type a) !(Seq (Type a))
   | TyLam !(Scope Int Type a)
@@ -149,7 +147,7 @@ instance Monad Type where
   return = pure
   t >>= f =
     case t of
-      TyBool -> TyBool
+      TyEmbed r -> TyEmbed ((>>= f) <$> r)
       TyVar a -> f a
       TyApp t1 t2 -> TyApp (t1 >>= f) ((>>= f) <$> t2)
       TyLam s -> TyLam (s >>>= f)

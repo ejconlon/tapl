@@ -1,0 +1,2 @@
+deps:
+	stack build intero
