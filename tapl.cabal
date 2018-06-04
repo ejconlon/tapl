@@ -15,6 +15,7 @@ library
   hs-source-dirs:      src
   exposed-modules:     Lib
                      , Coproduct
+                     , Eval
   build-depends:       base >= 4.10 && < 5
                      , bound
                      , comonad

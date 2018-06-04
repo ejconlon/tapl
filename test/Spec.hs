@@ -1,3 +1,4 @@
+import Eval
 import Lib
 import Test.Tasty
 import Test.Tasty.HUnit

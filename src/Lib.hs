@@ -14,9 +14,10 @@ import Control.Monad (ap)
 -- import Coproduct
 import Data.Sequence (Seq)
 import Data.Sequence as Seq
-import Data.Functor.Classes
-import GHC.Generics (Generic)
 import Data.Deriving (deriveEq1, deriveOrd1, deriveRead1, deriveShow1)
+import Data.Functor.Classes
+import Eval
+import GHC.Generics (Generic)
 
 -- data RawTerm f a =
 --     TmTrue
@@ -39,6 +40,21 @@ import Data.Deriving (deriveEq1, deriveOrd1, deriveRead1, deriveShow1)
 --   | BTmLam !(Scope Int Term a)
 --   deriving (Functor, Foldable, Traversable, Generic)
 
+class Monad f => Named f where
+  lam :: Scope Int f a -> f a
+  app :: f a -> Seq (f a) -> f a
+
+  lamN :: Eq a => Seq a -> f a -> f a
+  lamN names = lam . abstract (flip Seq.elemIndexL names)
+
+  lam1 :: Eq a => a -> f a -> f a
+  lam1 name = lamN (Seq.singleton name)
+
+  app1 :: f a -> f a -> f a
+  app1 left right = app left (Seq.singleton right)
+
+-- TERMS
+
 data Term a =
     TmTrue
   | TmFalse
@@ -46,15 +62,6 @@ data Term a =
   | TmApp !(Term a) !(Seq (Term a))
   | TmLam !(Scope Int Term a)
   deriving (Functor, Foldable, Traversable, Generic)
-
-lam :: Eq a => Seq a -> Term a -> Term a
-lam names = TmLam . abstract (flip Seq.elemIndexL names)
-
-lam1 :: Eq a => a -> Term a -> Term a
-lam1 name = lam (Seq.singleton name)
-
-app1 :: Term a -> Term a -> Term a
-app1 left right = TmApp left (Seq.singleton right)
 
 deriveEq1 ''Term
 deriveOrd1 ''Term
@@ -80,65 +87,9 @@ instance Monad Term where
       TmApp t1 t2 -> TmApp (t1 >>= f) ((>>= f) <$> t2)
       TmLam s -> TmLam (s >>>= f)
 
-data Step s a =
-    Done !a
-  | Running !s !(s -> Step s a)
-  deriving (Functor)
-
-idStep :: s -> Step s s
-idStep = flip Running Done
-
-runStepId :: Step s a -> a
-runStepId st =
-  case st of
-    Done a -> a
-    Running s f -> runStepId (f s)
-
-smallStepMaybe :: Step s a -> (s -> Maybe s) -> Maybe a
-smallStepMaybe st f = go st
-  where
-    go st' =
-      case st' of
-        Done a -> Nothing
-        Running s g -> do
-          s' <- f s
-          pure (runStepId (g s'))
-
-starStepMaybe :: Step s a -> (s -> Maybe s) -> Maybe a
-starStepMaybe st f = goFirst st
-  where
-    goFirst st' =
-      case st' of
-        Done _ -> Nothing
-        Running s g -> do
-          s' <- f s
-          goRest (g s')
-    goRest st' =
-      case st' of
-        Done a -> Just a
-        Running s g ->
-          case f s of
-            Nothing -> Just (runStepId st')
-            Just s' -> goRest (g s')
-
-instance Applicative (Step s) where
-  pure = Done
-  (<*>) = ap
-
-instance Monad (Step s) where
-  return = pure
-  Done a >>= f = f a
-  Running s n >>= f = Running s (\s' -> n s' >>= f)
-
-class Eval f where
-  holes :: f a -> Step (f a) (f a)
-  smallHoleStep :: f a -> Maybe (f a)
-
-smallStep :: Eval f => f a -> Maybe (f a)
-smallStep t = smallStepMaybe (holes t) smallHoleStep
-
-starStep :: Eval f => f a -> Maybe (f a)
-starStep t = starStepMaybe (holes t) smallHoleStep
+instance Named Term where
+  lam = TmLam
+  app = TmApp
 
 instance Eval Term where
   holes t =
@@ -153,3 +104,39 @@ instance Eval Term where
           TmLam s -> Just (instantiate (Seq.index args) s)
           _ -> Nothing
       _ -> Nothing
+
+-- TYPES
+
+data Type a =
+    TyBool
+  | TyVar !a
+  | TyApp !(Type a) !(Seq (Type a))
+  | TyLam !(Scope Int Type a)
+  deriving (Functor, Foldable, Traversable, Generic)
+
+deriveEq1 ''Type
+deriveOrd1 ''Type
+deriveRead1 ''Type
+deriveShow1 ''Type
+
+instance Eq a => Eq (Type a) where (==) = eq1
+instance Ord a => Ord (Type a) where compare = compare1
+instance Read a => Read (Type a) where readsPrec = readsPrec1
+instance Show a => Show (Type a) where showsPrec = showsPrec1
+
+instance Applicative Type where
+  pure = TyVar
+  (<*>) = ap
+
+instance Monad Type where
+  return = pure
+  t >>= f =
+    case t of
+      TyBool -> TyBool
+      TyVar a -> f a
+      TyApp t1 t2 -> TyApp (t1 >>= f) ((>>= f) <$> t2)
+      TyLam s -> TyLam (s >>>= f)
+
+-- instance Named Type where
+--   lam = TyLam
+--   app = TyApp

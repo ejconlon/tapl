@@ -5,6 +5,9 @@ module Coproduct
   , coproduct
   ) where
 
+-- NOTE Can't find this anymore, it's 90% from an old comonad version by ekmett
+-- https://hackage.haskell.org/package/comonad-4.0/docs/Data-Functor-Coproduct.html
+
 import Data.Functor.Classes (Eq1(..), Ord1(..))
 import Data.Foldable
 import Data.Traversable
