@@ -2,123 +2,129 @@
   DeriveFoldable,
   DeriveGeneric,
   DeriveTraversable,
-  ViewPatterns,
-  FlexibleContexts
+  FlexibleContexts,
+  TemplateHaskell,
+  ViewPatterns
 #-}
 
 module Lib where
 
-import Control.Monad (MonadPlus(..))
-import Control.Monad.Except (MonadError(..))
-import Data.Fix (Fix(..))
+import Bound
+import Control.Monad (ap)
 -- import Data.Sequence (Seq)
 -- import Data.Text (Text)
 -- import Data.Text as T
+import Data.Functor.Classes
 import GHC.Generics (Generic)
+import Data.Deriving (deriveEq1, deriveOrd1, deriveShow1)
 
-pureFix :: Applicative m => f (Fix f) -> m (Fix f)
-pureFix = pure . Fix
+-- data RawTerm f a =
+--   TmTrue
+-- | TmFalse
+-- | TmZero
+-- | TmIsZero !(f a)
+-- deriving (Functor, Foldable, Traversable, Generic)
 
 data Term a =
     TmTrue
   | TmFalse
-  | TmIf a a a
-  | TmZero
-  | TmSucc a
-  | TmPred a
-  | TmIsZero a
-  -- | TmLam Text a
-  -- | TmApp a a
-  deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+  | TmPure !a
+  | TmApp !(Term a) !(Term a)
+  | TmLam !(Scope () Term a)
+  deriving (Functor, Foldable, Traversable, Generic)
 
-type FixTerm = Fix Term
+lam :: Eq a => a -> Term a -> Term a
+lam name body = TmLam (abstract1 name body)
 
-data Type a =
-    TyBool
-  | TyNat
-  -- | TyFun a a
-  deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+deriveEq1 ''Term
+deriveOrd1 ''Term
+deriveShow1 ''Term
 
-type FixType = Fix Type
+instance Eq a => Eq (Term a) where (==) = eq1
+instance Ord a => Ord (Term a) where compare = compare1
+instance Show a => Show (Term a) where showsPrec = showsPrec1
 
-isNumericVal :: FixTerm -> Bool
-isNumericVal t =
-  case unFix t of
-    TmZero -> True
-    TmSucc t' -> isNumericVal t'
-    _ -> False
+instance Applicative Term where
+  pure = TmPure
+  (<*>) = ap
 
-isBoolVal :: FixTerm -> Bool
-isBoolVal t =
-  case unFix t of
-    TmTrue -> True
-    TmFalse -> True
-    _ -> False
+instance Monad Term where
+  return = pure
+  t >>= f =
+    case t of
+      TmTrue -> TmTrue
+      TmFalse -> TmFalse
+      TmPure a -> f a
+      TmApp t1 t2 -> TmApp (t1 >>= f) (t2 >>= f)
+      TmLam s -> TmLam (s >>>= f)
 
-isVal :: FixTerm -> Bool
-isVal = (||) <$> isNumericVal <*> isBoolVal
+data Step s a =
+    Done !a
+  | Running !s !(s -> Step s a)
+  deriving (Functor)
 
-smallStep :: MonadPlus m => FixTerm -> m FixTerm
-smallStep t =
-  case unFix t of
-    TmIf (unFix -> TmTrue) t2 _ -> return t2
-    TmIf (unFix -> TmFalse) _ t3 -> return t3
-    TmIf t1 t2 t3 -> do
-      t1' <- smallStep t1
-      pureFix (TmIf t1' t2 t3)
-    TmSucc t1 -> do
-      t1' <- smallStep t1
-      pureFix (TmSucc t1')
-    TmPred (unFix -> TmZero) -> pureFix TmZero
-    TmPred (unFix -> TmSucc t1) | isNumericVal t1 -> pure t1
-    TmPred t1 -> do
-      t1' <- smallStep t1
-      pureFix (TmPred t1')
-    TmIsZero (unFix -> TmZero) -> pureFix TmTrue
-    TmIsZero (unFix -> TmSucc t1) | isNumericVal t1 -> pureFix TmFalse
-    TmIsZero t1 -> do
-      t1' <- smallStep t1
-      pureFix (TmIsZero t1')
-    _ -> mzero
+idStep :: s -> Step s s
+idStep = flip Running Done
 
-evaluate :: FixTerm -> FixTerm
-evaluate t =
-  case smallStep t of
-    Just t' -> evaluate t'
-    Nothing -> t
+runStepId :: Step s a -> a
+runStepId st =
+  case st of
+    Done a -> a
+    Running s f -> runStepId (f s)
 
-data TypeErr =
-    Boom
-  | CannotUnify FixType FixType
-  deriving (Show, Eq, Generic)
+smallStepMaybe :: Step s a -> (s -> Maybe s) -> Maybe a
+smallStepMaybe st f = go st
+  where
+    go st' =
+      case st' of
+        Done a -> Nothing
+        Running s g -> do
+          s' <- f s
+          pure (runStepId (g s'))
 
-unifyTy :: MonadError TypeErr m => FixType -> FixType -> m FixType
-unifyTy t1 t2 =
-    case (unFix t1, unFix t2) of
-      (TyBool, TyBool) -> pureFix TyBool
-      (TyNat, TyNat) -> pureFix TyNat
-      _ -> throwError (CannotUnify t1 t2)
+starStepMaybe :: Step s a -> (s -> Maybe s) -> Maybe a
+starStepMaybe st f = goFirst st
+  where
+    goFirst st' =
+      case st' of
+        Done _ -> Nothing
+        Running s g -> do
+          s' <- f s
+          goRest (g s')
+    goRest st' =
+      case st' of
+        Done a -> Just a
+        Running s g ->
+          case f s of
+            Nothing -> Just (runStepId st')
+            Just s' -> goRest (g s')
 
-checkType :: MonadError TypeErr m => FixType -> FixTerm -> m ()
-checkType _ _ = undefined
+instance Applicative (Step s) where
+  pure = Done
+  (<*>) = ap
 
-inferType :: MonadError TypeErr m => FixTerm -> m FixType
-inferType t =
-  case unFix t of
-    TmTrue -> pureFix TyBool
-    TmFalse -> pureFix TyBool
-    TmIf t1 t2 t3 -> do
-      checkType (Fix TyBool) t1
-      thenTy <- inferType t2
-      elseTy <- inferType t3
-      unifyTy thenTy elseTy
-    TmZero -> pureFix TyNat
-    TmSucc t1 -> do
-      checkType (Fix TyNat) t1
-      pureFix TyNat
-    TmPred t1 -> do
-      checkType (Fix TyNat) t1
-      pureFix TyNat
-    TmIsZero t1 -> do
-      checkType (Fix TyNat) t1
-      pureFix TyBool
+instance Monad (Step s) where
+  return = pure
+  Done a >>= f = f a
+  Running s n >>= f = Running s (\s' -> n s' >>= f)
+
+holes :: Term a -> Step (Term a) (Term a)
+holes t =
+  case t of
+    TmApp body arg -> idStep =<< TmApp <$> holes body <*> holes arg
+    _ -> pure t
+
+smallHoleStep :: Term a -> Maybe (Term a)
+smallHoleStep t =
+  case t of
+    TmApp body arg ->
+      case body of
+        TmLam s -> Just (instantiate1 arg s)
+        _ -> Nothing
+    _ -> Nothing
+
+smallStep :: Term a -> Maybe (Term a)
+smallStep t = smallStepMaybe (holes t) smallHoleStep
+
+starStep :: Term a -> Maybe (Term a)
+starStep t = starStepMaybe (holes t) smallHoleStep
