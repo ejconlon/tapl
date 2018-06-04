@@ -3,6 +3,7 @@
   DeriveGeneric,
   DeriveTraversable,
   FlexibleContexts,
+  FunctionalDependencies,
   TemplateHaskell,
   ViewPatterns
 #-}
@@ -53,11 +54,25 @@ class Monad f => Named f where
   app1 :: f a -> f a -> f a
   app1 left right = app left (Seq.singleton right)
 
+class Lifting f g | f -> g where
+  lifting :: g (f a) -> f a
+
 -- TERMS
 
+data RawTerm a =
+    RTmTrue
+  | RTmFalse
+  | RTmZero
+  | RTmIsZero !a
+  deriving (Functor, Foldable, Traversable, Generic)
+
+deriveEq1 ''RawTerm
+deriveOrd1 ''RawTerm
+deriveRead1 ''RawTerm
+deriveShow1 ''RawTerm
+
 data Term a =
-    TmTrue
-  | TmFalse
+    TmLift !(RawTerm (Term a))
   | TmVar !a
   | TmApp !(Term a) !(Seq (Term a))
   | TmLam !(Scope Int Term a)
@@ -81,8 +96,7 @@ instance Monad Term where
   return = pure
   t >>= f =
     case t of
-      TmTrue -> TmTrue
-      TmFalse -> TmFalse
+      TmLift r -> TmLift ((>>= f) <$> r)
       TmVar a -> f a
       TmApp t1 t2 -> TmApp (t1 >>= f) ((>>= f) <$> t2)
       TmLam s -> TmLam (s >>>= f)
@@ -104,6 +118,9 @@ instance Eval Term where
           TmLam s -> Just (instantiate (Seq.index args) s)
           _ -> Nothing
       _ -> Nothing
+
+instance Lifting Term RawTerm where
+  lifting = TmLift
 
 -- TYPES
 
