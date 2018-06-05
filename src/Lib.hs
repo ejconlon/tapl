@@ -4,8 +4,7 @@
   DeriveTraversable,
   FlexibleContexts,
   GeneralizedNewtypeDeriving,
-  TemplateHaskell,
-  TypeFamilies
+  TemplateHaskell
 #-}
 
 module Lib where
@@ -16,9 +15,10 @@ import Control.Monad (ap)
 import Control.Monad.Except (MonadError(..))
 import Control.Monad.Reader (MonadReader(..), ReaderT(..), withReaderT)
 import Data.Fix
-import Data.Foldable (for_)
+import Data.Foldable (fold, for_)
 import Data.Map.Strict (Map)
 import Data.Map.Strict as Map
+import Data.Semigroup (Semigroup(..), Option(..))
 import Data.Sequence (Seq)
 import Data.Sequence as Seq
 import Data.Deriving (deriveEq1, deriveOrd1, deriveRead1, deriveShow1)
@@ -84,66 +84,85 @@ instance Read a => Read (RawTerm a) where readsPrec = readsPrec1
 instance Show a => Show (RawTerm a) where showsPrec = showsPrec1
 
 -- TODO add info param
-data Term n a =
-    TmEmbed !(RawTerm (Term n a))
-  | TmVar !a
-  | TmApp !(Term n a) !(Seq (Term n a))
-  | TmLam !(Seq (n, FixType)) !(Scope (Name n Int) (Term n) a)
+data Term o n a =
+    TmEmbed !(Option o) !(RawTerm (Term o n a))
+  | TmVar !(Option o) !a
+  | TmApp !(Option o) !(Term o n a) !(Seq (Term o n a))
+  | TmLam !(Option o) !(Seq (n, FixType)) !(Scope (Name n Int) (Term o n) a)
   deriving (Functor, Foldable, Traversable, Generic)
+
+noOption :: Option o
+noOption = Option Nothing
 
 deriveEq1 ''Term
 deriveOrd1 ''Term
 deriveRead1 ''Term
 deriveShow1 ''Term
 
-instance (Eq n, Eq a) => Eq (Term n a) where (==) = eq1
-instance (Ord n, Ord a) => Ord (Term n a) where compare = compare1
-instance (Read n, Read a) => Read (Term n a) where readsPrec = readsPrec1
-instance (Show n, Show a) => Show (Term n a) where showsPrec = showsPrec1
+instance (Eq o, Eq n, Eq a) => Eq (Term o n a) where (==) = eq1
+instance (Ord o, Ord n, Ord a) => Ord (Term o n a) where compare = compare1
+instance (Read o, Read n, Read a) => Read (Term o n a) where readsPrec = readsPrec1
+instance (Show o, Show n, Show a) => Show (Term o n a) where showsPrec = showsPrec1
 
-instance Applicative (Term n) where
-  pure = TmVar
+info :: Term o n a -> Option o
+info tm =
+  case tm of
+    TmEmbed o _ -> o
+    TmVar o _ -> o
+    TmApp o _ _ -> o
+    TmLam o _ _ -> o
+
+instance Applicative (Term o n) where
+  pure = TmVar noOption
   (<*>) = ap
 
-instance Monad (Term n) where
+instance Monad (Term o n) where
   return = pure
   t >>= f =
     case t of
-      TmEmbed r -> TmEmbed ((>>= f) <$> r)
-      TmVar a -> f a
-      TmApp t1 t2 -> TmApp (t1 >>= f) ((>>= f) <$> t2)
-      TmLam tys s -> TmLam tys (s >>>= f)
+      TmEmbed o r -> TmEmbed o ((>>= f) <$> r)
+      TmVar _ a -> f a
+      TmApp o t1 t2 -> TmApp o (t1 >>= f) ((>>= f) <$> t2)
+      TmLam o tys s -> TmLam o tys (s >>>= f)
 
-app :: Term n a -> Seq (Term n a) -> Term n a
-app = TmApp
+var :: n -> Term o n n
+var = TmVar noOption
 
-embed :: RawTerm (Term n a) -> Term n a
-embed = TmEmbed
+app :: Term o n a -> Seq (Term o n a) -> Term o n a
+app = TmApp noOption
 
-lam :: Eq n => Seq (n, FixType) -> Term n n -> Term n n
-lam ntys body = TmLam ntys (abstractName (flip Seq.elemIndexL (fst <$> ntys)) body)
+embed :: RawTerm (Term o n a) -> Term o n a
+embed = TmEmbed noOption
 
-lam1 :: Eq n => n -> FixType -> Term n n -> Term n n
+lam :: Eq n => Seq (n, FixType) -> Term o n n -> Term o n n
+lam ntys body = TmLam noOption ntys (abstractName (flip Seq.elemIndexL (fst <$> ntys)) body)
+
+lam1 :: Eq n => n -> FixType -> Term o n n -> Term o n n
 lam1 name ty = lam (Seq.singleton (name, ty))
 
-app1 :: Term n a -> Term n a -> Term n a
+app1 :: Term o n a -> Term o n a -> Term o n a
 app1 left right = app left (Seq.singleton right)
 
 nameIndex :: Name n b -> b
 nameIndex (Name _ b) = b
 
-instance Eval (Term n) where
+instance Semigroup o => Eval (Term o n) where
   -- TODO add IsZero hole
   holes t =
     case t of
-      TmApp body args -> idStep =<< TmApp <$> holes body <*> traverse holes args
+      TmApp _ body args -> do
+        body' <- holes body
+        args' <- traverse holes args
+        let info' = (info body') <> (fold (info <$> args'))
+            t' = TmApp info' body' args'
+        idStep t'
       _ -> pure t
 
   smallHoleStep t =
     case t of
-      TmApp body args ->
+      TmApp _ body args ->
         case body of
-          TmLam _ s -> Just (instantiate (Seq.index args . nameIndex) s)
+          TmLam _ _ s -> Just (instantiate (Seq.index args . nameIndex) s)
           _ -> Nothing
       _ -> Nothing
 
@@ -192,14 +211,14 @@ overLeft f ei =
 withTypeCtx :: (TypeCtx a -> TypeCtx b) -> (TypeErr n b -> TypeErr n a) -> CheckM n b x -> CheckM n a x
 withTypeCtx f g c = CheckM (ReaderT (\r -> overLeft g (runCheckM c (f r))))
 
-checkType :: Ord a => FixType -> Term n a -> CheckM n a ()
+checkType :: Ord a => FixType -> Term o n a -> CheckM n a ()
 checkType ety tm = do
   aty <- inferType tm
   if ety /= aty
     then throwError (TypeMismatch aty ety)
     else pure ()
 
-inferRawType :: Ord a => RawTerm (Term n a) -> CheckM n a FixType
+inferRawType :: Ord a => RawTerm (Term o n a) -> CheckM n a FixType
 inferRawType rtm =
   case rtm of
     RTmTrue -> pureFix TyBool
@@ -207,18 +226,18 @@ inferRawType rtm =
     RTmZero -> pureFix TyNat
     RTmIsZero a -> checkType (Fix TyNat) a *> pureFix TyNat
 
-inferType :: Ord a => Term n a -> CheckM n a FixType
+inferType :: Ord a => Term o n a -> CheckM n a FixType
 inferType tm =
   case tm of
-    TmEmbed r -> inferRawType r
-    TmVar a -> do
+    TmEmbed _ r -> inferRawType r
+    TmVar _ a -> do
       res <- ask
       case res a of
         Nothing -> throwError (MissingFreeType a)
         Just ty -> pure ty
-    TmApp body args -> do
+    TmApp _ body args -> do
       case body of
-        TmLam tys s -> do
+        TmLam _ tys s -> do
           let expected = Seq.length tys
               actual = Seq.length args
           _ <- if expected /= actual
@@ -227,7 +246,7 @@ inferType tm =
           for_ (Seq.zip tys args) (\((_, ty), arg) -> checkType ty arg)
           inferType body
         _ -> throwError AppNotLam
-    TmLam tys s -> do
+    TmLam _ tys s -> do
       let scopedTerm = fromScope s
       bodyTy <- withTypeCtx (bindCtx tys) unbindErr (inferType scopedTerm)
       pureFix (TyFun bodyTy (snd <$> tys))
