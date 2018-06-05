@@ -3,6 +3,7 @@
   DeriveGeneric,
   DeriveTraversable,
   FlexibleContexts,
+  GeneralizedNewtypeDeriving,
   TemplateHaskell,
   TypeFamilies
 #-}
@@ -10,8 +11,14 @@
 module Lib where
 
 import Bound
+import Bound.Name
 import Control.Monad (ap)
--- import Coproduct
+import Control.Monad.Except (MonadError(..))
+import Control.Monad.Reader (MonadReader(..), ReaderT(..), withReaderT)
+import Data.Fix
+import Data.Foldable (for_)
+import Data.Map.Strict (Map)
+import Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import Data.Sequence as Seq
 import Data.Deriving (deriveEq1, deriveOrd1, deriveRead1, deriveShow1)
@@ -19,21 +26,43 @@ import Data.Functor.Classes
 import Eval
 import GHC.Generics (Generic)
 
-class Monad f => Named f where
-  type Raw f :: * -> *
+pureFix :: Applicative m => f (Fix f) -> m (Fix f)
+pureFix = pure . Fix
 
-  lam :: Scope Int f a -> f a
-  app :: f a -> Seq (f a) -> f a
-  embed :: Raw f (f a) -> f a
+-- TYPES
 
-  lamN :: Eq a => Seq a -> f a -> f a
-  lamN names = lam . abstract (flip Seq.elemIndexL names)
+data RawType a =
+    RTyBool
+  | RTyNat
+  deriving (Functor, Foldable, Traversable)
 
-  lam1 :: Eq a => a -> f a -> f a
-  lam1 name = lamN (Seq.singleton name)
+deriveEq1 ''RawType
+deriveOrd1 ''RawType
+deriveRead1 ''RawType
+deriveShow1 ''RawType
 
-  app1 :: f a -> f a -> f a
-  app1 left right = app left (Seq.singleton right)
+instance Eq a => Eq (RawType a) where (==) = eq1
+instance Ord a => Ord (RawType a) where compare = compare1
+instance Read a => Read (RawType a) where readsPrec = readsPrec1
+instance Show a => Show (RawType a) where showsPrec = showsPrec1
+
+data Type a =
+    TyBool
+  | TyNat
+  | TyFun !a !(Seq a)
+  deriving (Functor, Foldable, Traversable, Generic)
+
+type FixType = Fix Type
+
+deriveEq1 ''Type
+deriveOrd1 ''Type
+deriveRead1 ''Type
+deriveShow1 ''Type
+
+instance Eq a => Eq (Type a) where (==) = eq1
+instance Ord a => Ord (Type a) where compare = compare1
+instance Read a => Read (Type a) where readsPrec = readsPrec1
+instance Show a => Show (Type a) where showsPrec = showsPrec1
 
 -- TERMS
 
@@ -54,11 +83,12 @@ instance Ord a => Ord (RawTerm a) where compare = compare1
 instance Read a => Read (RawTerm a) where readsPrec = readsPrec1
 instance Show a => Show (RawTerm a) where showsPrec = showsPrec1
 
-data Term a =
-    TmEmbed !(RawTerm (Term a))
+-- TODO add info param
+data Term n a =
+    TmEmbed !(RawTerm (Term n a))
   | TmVar !a
-  | TmApp !(Term a) !(Seq (Term a))
-  | TmLam !(Scope Int Term a)
+  | TmApp !(Term n a) !(Seq (Term n a))
+  | TmLam !(Seq (n, FixType)) !(Scope (Name n Int) (Term n) a)
   deriving (Functor, Foldable, Traversable, Generic)
 
 deriveEq1 ''Term
@@ -66,31 +96,44 @@ deriveOrd1 ''Term
 deriveRead1 ''Term
 deriveShow1 ''Term
 
-instance Eq a => Eq (Term a) where (==) = eq1
-instance Ord a => Ord (Term a) where compare = compare1
-instance Read a => Read (Term a) where readsPrec = readsPrec1
-instance Show a => Show (Term a) where showsPrec = showsPrec1
+instance (Eq n, Eq a) => Eq (Term n a) where (==) = eq1
+instance (Ord n, Ord a) => Ord (Term n a) where compare = compare1
+instance (Read n, Read a) => Read (Term n a) where readsPrec = readsPrec1
+instance (Show n, Show a) => Show (Term n a) where showsPrec = showsPrec1
 
-instance Applicative Term where
+instance Applicative (Term n) where
   pure = TmVar
   (<*>) = ap
 
-instance Monad Term where
+instance Monad (Term n) where
   return = pure
   t >>= f =
     case t of
       TmEmbed r -> TmEmbed ((>>= f) <$> r)
       TmVar a -> f a
       TmApp t1 t2 -> TmApp (t1 >>= f) ((>>= f) <$> t2)
-      TmLam s -> TmLam (s >>>= f)
+      TmLam tys s -> TmLam tys (s >>>= f)
 
-instance Named Term where
-  type Raw Term = RawTerm
-  lam = TmLam
-  app = TmApp
-  embed = TmEmbed
+app :: Term n a -> Seq (Term n a) -> Term n a
+app = TmApp
 
-instance Eval Term where
+embed :: RawTerm (Term n a) -> Term n a
+embed = TmEmbed
+
+lam :: Eq n => Seq (n, FixType) -> Term n n -> Term n n
+lam ntys body = TmLam ntys (abstractName (flip Seq.elemIndexL (fst <$> ntys)) body)
+
+lam1 :: Eq n => n -> FixType -> Term n n -> Term n n
+lam1 name ty = lam (Seq.singleton (name, ty))
+
+app1 :: Term n a -> Term n a -> Term n a
+app1 left right = app left (Seq.singleton right)
+
+nameIndex :: Name n b -> b
+nameIndex (Name _ b) = b
+
+instance Eval (Term n) where
+  -- TODO add IsZero hole
   holes t =
     case t of
       TmApp body args -> idStep =<< TmApp <$> holes body <*> traverse holes args
@@ -100,59 +143,91 @@ instance Eval Term where
     case t of
       TmApp body args ->
         case body of
-          TmLam s -> Just (instantiate (Seq.index args) s)
+          TmLam _ s -> Just (instantiate (Seq.index args . nameIndex) s)
           _ -> Nothing
       _ -> Nothing
 
--- TYPES
+data TypeErr n a =
+    ArityMismatch Int Int
+  | TypeMismatch FixType FixType
+  | MissingBoundType n Int
+  | MissingFreeType a
+  | AppNotLam
+  deriving (Show, Eq, Functor, Foldable, Traversable)
 
-data RawType a =
-    RTyBool
-  | RTyNat
-  deriving (Functor, Foldable, Traversable)
+type TypeCtx a = a -> Maybe FixType
 
-deriveEq1 ''RawType
-deriveOrd1 ''RawType
-deriveRead1 ''RawType
-deriveShow1 ''RawType
+newtype CheckM n a x =
+  CheckM {
+    unCheckM :: ReaderT (TypeCtx a) (Either (TypeErr n a)) x
+  } deriving (Functor, Applicative, Monad, MonadReader (TypeCtx a), MonadError (TypeErr n a))
 
-instance Eq a => Eq (RawType a) where (==) = eq1
-instance Ord a => Ord (RawType a) where compare = compare1
-instance Read a => Read (RawType a) where readsPrec = readsPrec1
-instance Show a => Show (RawType a) where showsPrec = showsPrec1
+runCheckM :: CheckM n a x -> TypeCtx a -> Either (TypeErr n a) x
+runCheckM c = runReaderT (unCheckM c)
 
-data Type a =
-    TyEmbed !(RawType (Type a))
-  | TyVar !a
-  | TyApp !(Type a) !(Seq (Type a))
-  | TyLam !(Scope Int Type a)
-  deriving (Functor, Foldable, Traversable, Generic)
+bindCtx :: Seq (n, FixType) -> TypeCtx a -> TypeCtx (Var (Name n Int) a)
+bindCtx tys ctx var =
+  case var of
+    F a -> ctx a
+    B (Name _ i) -> snd <$> Seq.lookup i tys
 
-deriveEq1 ''Type
-deriveOrd1 ''Type
-deriveRead1 ''Type
-deriveShow1 ''Type
+unbindErr :: TypeErr n (Var (Name n Int) a) -> TypeErr n a
+unbindErr err =
+  case err of
+    ArityMismatch x y -> ArityMismatch x y
+    TypeMismatch x y -> TypeMismatch x y
+    MissingBoundType n i -> MissingBoundType n i
+    MissingFreeType var ->
+      case var of
+        B (Name n i) -> MissingBoundType n i
+        F a -> MissingFreeType a
+    AppNotLam -> AppNotLam
 
-instance Eq a => Eq (Type a) where (==) = eq1
-instance Ord a => Ord (Type a) where compare = compare1
-instance Read a => Read (Type a) where readsPrec = readsPrec1
-instance Show a => Show (Type a) where showsPrec = showsPrec1
+overLeft :: (e -> e') -> Either e a -> Either e' a
+overLeft f ei =
+  case ei of
+    Left e -> Left (f e)
+    Right a -> Right a
 
-instance Applicative Type where
-  pure = TyVar
-  (<*>) = ap
+withTypeCtx :: (TypeCtx a -> TypeCtx b) -> (TypeErr n b -> TypeErr n a) -> CheckM n b x -> CheckM n a x
+withTypeCtx f g c = CheckM (ReaderT (\r -> overLeft g (runCheckM c (f r))))
 
-instance Monad Type where
-  return = pure
-  t >>= f =
-    case t of
-      TyEmbed r -> TyEmbed ((>>= f) <$> r)
-      TyVar a -> f a
-      TyApp t1 t2 -> TyApp (t1 >>= f) ((>>= f) <$> t2)
-      TyLam s -> TyLam (s >>>= f)
+checkType :: Ord a => FixType -> Term n a -> CheckM n a ()
+checkType ety tm = do
+  aty <- inferType tm
+  if ety /= aty
+    then throwError (TypeMismatch aty ety)
+    else pure ()
 
-instance Named Type where
-  type Raw Type = RawType
-  lam = TyLam
-  app = TyApp
-  embed = TyEmbed
+inferRawType :: Ord a => RawTerm (Term n a) -> CheckM n a FixType
+inferRawType rtm =
+  case rtm of
+    RTmTrue -> pureFix TyBool
+    RTmFalse -> pureFix TyBool
+    RTmZero -> pureFix TyNat
+    RTmIsZero a -> checkType (Fix TyNat) a *> pureFix TyNat
+
+inferType :: Ord a => Term n a -> CheckM n a FixType
+inferType tm =
+  case tm of
+    TmEmbed r -> inferRawType r
+    TmVar a -> do
+      res <- ask
+      case res a of
+        Nothing -> throwError (MissingFreeType a)
+        Just ty -> pure ty
+    TmApp body args -> do
+      case body of
+        TmLam tys s -> do
+          let expected = Seq.length tys
+              actual = Seq.length args
+          _ <- if expected /= actual
+                then throwError (ArityMismatch expected actual)
+                else pure ()
+          for_ (Seq.zip tys args) (\((_, ty), arg) -> checkType ty arg)
+          inferType body
+        _ -> throwError AppNotLam
+    TmLam tys s -> do
+      let scopedTerm = fromScope s
+      bodyTy <- withTypeCtx (bindCtx tys) unbindErr (inferType scopedTerm)
+      pureFix (TyFun bodyTy (snd <$> tys))

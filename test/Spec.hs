@@ -1,3 +1,4 @@
+import Data.Fix
 import Eval
 import Lib
 import Test.Tasty
@@ -5,8 +6,11 @@ import Test.Tasty.HUnit
 
 main = defaultMain tests
 
-tmTrue :: Term String
+tmTrue :: Term String String
 tmTrue = embed RTmTrue
+
+tyBool :: FixType
+tyBool = Fix TyBool
 
 tests = testGroup "tests"
   [ testCase "dummy" $
@@ -14,6 +18,6 @@ tests = testGroup "tests"
   , testCase "already normalized" $ do
       smallStep tmTrue @?= Nothing
   , testCase "lam" $ do
-      let x = app1 (lam1 "z" (TmVar "z")) tmTrue
+      let x = app1 (lam1 "z" tyBool (TmVar "z")) tmTrue
       smallStep x @?= Just tmTrue
   ]

@@ -32,6 +32,7 @@ test-suite tapl-test
   main-is:             Spec.hs
   build-depends:       base
                      , tapl
+                     , data-fix
                      , tasty
                      , tasty-hunit
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
