@@ -104,13 +104,32 @@ instance (Ord o, Ord n, Ord a) => Ord (Term o n a) where compare = compare1
 instance (Read o, Read n, Read a) => Read (Term o n a) where readsPrec = readsPrec1
 instance (Show o, Show n, Show a) => Show (Term o n a) where showsPrec = showsPrec1
 
-info :: Term o n a -> Option o
-info tm =
-  case tm of
+scopeInfoTraversal :: Applicative f => (o -> f x) -> (Scope z (Term o n) a) -> f (Scope z (Term x n) a)
+scopeInfoTraversal f s = toScope <$> termInfoTraversal f (fromScope s)
+
+termInfoTraversal :: Applicative f => (o -> f x) -> Term o n a -> f (Term x n a)
+termInfoTraversal f t =
+  case t of
+    TmEmbed o w -> TmEmbed <$> traverse f o <*> traverse (termInfoTraversal f) w
+    TmVar o w -> TmVar <$> traverse f o <*> pure w
+    TmApp o w v -> TmApp <$> traverse f o <*> termInfoTraversal f w <*> traverse (termInfoTraversal f) v
+    TmLam o w v -> TmLam <$> traverse f o <*> pure w <*> scopeInfoTraversal f v
+
+getTermInfo :: Term o n a -> Option o
+getTermInfo t =
+  case t of
     TmEmbed o _ -> o
     TmVar o _ -> o
     TmApp o _ _ -> o
     TmLam o _ _ -> o
+
+-- termNameTraversal :: Applicative f => (n -> f m) -> Term o n a -> f (Term o m a)
+-- termNameTraversal f t =
+--   case t of
+--     TmEmbed o w -> TmEmbed o <$> traverse (termNameTraversal f) w
+--     TmVar o w -> pure (TmVar o w)
+--     TmApp o w v -> TmApp o <$> termNameTraversal f w <*> traverse (termNameTraversal f) v
+    -- TmLam o w v -> TmLam o <$> _ w <*> _ f v
 
 instance Applicative (Term o n) where
   pure = TmVar noOption
@@ -153,8 +172,12 @@ instance Semigroup o => Eval (Term o n) where
       TmApp _ body args -> do
         body' <- holes body
         args' <- traverse holes args
-        let info' = (info body') <> (fold (info <$> args'))
+        let info' = (getTermInfo body') <> (fold (getTermInfo <$> args'))
             t' = TmApp info' body' args'
+        idStep t'
+      TmEmbed _ (RTmIsZero t1) -> do
+        t1' <- holes t1
+        let t' = TmEmbed noOption (RTmIsZero t1')
         idStep t'
       _ -> pure t
 
@@ -163,6 +186,13 @@ instance Semigroup o => Eval (Term o n) where
       TmApp _ body args ->
         case body of
           TmLam _ _ s -> Just (instantiate (Seq.index args . nameIndex) s)
+          _ -> Nothing
+      TmEmbed _ rt ->
+        case rt of
+          RTmIsZero t1 ->
+            case t1 of
+              TmEmbed _ RTmZero -> Just (TmEmbed noOption RTmTrue)
+              _ -> Nothing
           _ -> Nothing
       _ -> Nothing
 
